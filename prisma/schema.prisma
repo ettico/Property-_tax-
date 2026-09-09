@@ -1,0 +1,201 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+enum Side {
+  EAST
+  WEST
+}
+
+// Mirrors the "מהות פעולה" values seen in Ashed's monthly Excel export.
+enum ActionType {
+  LEVY_CHANGE      // שינוי חיוב
+  NEW_CONSTRUCTION // בניה חדשה
+  NEW_PROPERTY     // נכס חדש
+  ASSESSMENT       // הערכת נכס
+  OCCUPANT_LOCATE  // איתור מחזיקים
+}
+
+// How a commission amount is derived, per the contract clauses.
+enum CalcMethod {
+  PERCENT_OF_INCREASE       // % × תוספת חיוב (שיטה א' / החוזה היחיד במזרח)
+  PERCENT_OF_INCREASE_HALF  // אותו % אבל מחצית - חיוב לפי הערכה
+  FIXED_PER_SQM             // ₪ קבוע × שטח חדש (שיטה ב')
+  FIXED_FLAT                // ₪ קבוע לפעולה, בלי קשר לשטח (איתור מחזיקים)
+}
+
+// One row per pricing rule taken from a signed Ashed<->municipality contract.
+// Kept as data (not hardcoded in the rules engine) so a new contract year /
+// CPI-indexed update can be added without touching code.
+model CommissionRule {
+  id         String     @id @default(cuid())
+  side       Side
+  actionType ActionType
+  calcMethod CalcMethod
+  rate       Float      // decimal fraction for percent methods (0.094), ₪ amount for fixed methods
+  validFrom  DateTime
+  validTo    DateTime?
+  sourceNote String? // e.g. "מכרז 80.2021, נספח ה', שיטה א'"
+  createdAt  DateTime   @default(now())
+
+  @@index([side, actionType, validFrom])
+}
+
+// Appendix D of the tax order: which tax-block/parcel range belongs to
+// which billing zone and city side.
+model TaxZoneMapping {
+  id               String   @id @default(cuid())
+  gush             String
+  chelkaFrom       Int?
+  chelkaTo         Int?
+  zone             String // "א" | "ב" | "ג" | "ד"
+  side             Side
+  neighborhoodName String?
+  validYear        Int
+  createdAt        DateTime @default(now())
+
+  @@index([gush, validYear])
+}
+
+// The tax order's ₪/sqm/year table, per property type + zone + year.
+model TaxRate {
+  id               String   @id @default(cuid())
+  propertyTypeCode Int // "קובעי מס"
+  zone             String
+  pricePerSqm      Float
+  year             Int
+  createdAt        DateTime @default(now())
+
+  @@unique([propertyTypeCode, zone, year])
+}
+
+model ImportBatch {
+  id         String   @id @default(cuid())
+  month      Int
+  year       Int
+  fileName   String
+  uploadedAt DateTime @default(now())
+
+  records PropertyRecord[]
+}
+
+// One row from Ashed's monthly Excel export.
+model PropertyRecord {
+  id            String      @id @default(cuid())
+  importBatchId String
+  importBatch   ImportBatch @relation(fields: [importBatchId], references: [id], onDelete: Cascade)
+
+  assetId       String // "זיהוי נכס", e.g. 30074-009-000-1018
+  gush          String
+  chelka        String
+  subChelka     String
+  accountNumber String // "מספר חשבון"
+
+  effectiveDate DateTime? // "תאריך תחולה"
+  changeDate    DateTime  // "תאריך שינוי"
+
+  oldArea    Float?
+  oldTaxCode Int?
+  newArea    Float
+  newTaxCode Int
+
+  areaDiff        Float
+  levyIncrease    Float // "תוספת חיוב (שח)"
+  commissionPaid  Float // "סך עמלה (שח)" - what the municipal system actually paid Ashed
+  actionType      ActionType
+  rawActionLabel  String // original Hebrew label, kept for traceability
+
+  side Side? // resolved from TaxZoneMapping once gush/chelka is matched
+
+  createdAt DateTime @default(now())
+
+  findings         AuditFinding[]
+  surveyDocuments  SurveyDocument[]
+
+  @@index([importBatchId])
+  @@index([gush, chelka, subChelka])
+}
+
+// One scanned page/file from the surveyor's case folder, after it has been
+// matched (by gush/chelka/sub-chelka found inside it) to a PropertyRecord.
+// A file that cannot be matched to any record stays with propertyRecordId
+// null and isOrphan = true, and is reported rather than silently dropped.
+enum DocumentType {
+  SURVEY_FORM        // טופס סקר נכסים
+  MEASUREMENT_PLAN   // תוכנית מדידה
+  MUNICIPAL_LETTER   // מכתב עירייה / מענה להשגה
+  OBJECTION_FORM     // טופס השגה על חיוב ארנונה
+  LEASE_AGREEMENT    // הסכם שכירות
+  OTHER
+}
+
+model SurveyDocument {
+  id               String        @id @default(cuid())
+  propertyRecordId String?
+  propertyRecord   PropertyRecord? @relation(fields: [propertyRecordId], references: [id], onDelete: SetNull)
+
+  filePath        String
+  pageRange       String? // e.g. "7-8" within the source bundle
+  docType         DocumentType
+  matchedGush     String?
+  matchedChelka   String?
+  matchedSubChelka String?
+  extractedAreaSqm Float?
+  isOrphan        Boolean @default(false)
+  notes           String?
+
+  createdAt DateTime @default(now())
+
+  @@index([propertyRecordId])
+}
+
+enum FindingType {
+  AREA_MISMATCH               // שטח מהמסמכים לא תואם לאקסל
+  LEVY_MISMATCH                // תוספת חיוב לא תואמת לצו המיסים
+  COMMISSION_MISMATCH          // עמלה לא תואמת לחוזה
+  SPLIT_IMBALANCE              // פיצול שלא מתאזן (אב/בן)
+  MISSING_DOCUMENT             // אין אסמכתא למדידה
+  ORPHAN_DOCUMENT              // מסמך שלא הותאם לאף שורה
+  NEGATIVE_COMMISSION_ON_DECREASE // עמלה שלילית על הפחתת שטח בלי הסבר קיזוז
+  RULE_NOT_CONFIGURED          // אין כלל עמלה מוגדר למקרה הזה (למשל תעריף איתור מחזיקים לא מאומת)
+}
+
+enum FindingSeverity {
+  INFO
+  REVIEW
+  CRITICAL
+}
+
+enum FindingStatus {
+  OPEN
+  ACCEPTED   // נבדק, יש הסבר לגיטימי (למשל פיצול תקין)
+  RESOLVED   // תוקן/טופל
+}
+
+model AuditFinding {
+  id               String          @id @default(cuid())
+  propertyRecordId String
+  propertyRecord   PropertyRecord  @relation(fields: [propertyRecordId], references: [id], onDelete: Cascade)
+
+  findingType FindingType
+  severity    FindingSeverity
+  status      FindingStatus   @default(OPEN)
+
+  expectedValue Float?
+  actualValue   Float?
+  diff          Float?
+  explanation   String
+
+  reviewedBy String?
+  reviewedAt DateTime?
+
+  createdAt DateTime @default(now())
+
+  @@index([propertyRecordId])
+  @@index([status])
+}
