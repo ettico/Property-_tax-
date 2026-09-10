@@ -2,12 +2,21 @@ import type { NextConfig } from "next";
 import path from "node:path";
 
 const nextConfig: NextConfig = {
-  // This project sits as a sibling folder inside the Geometrikal repo,
-  // which has its own lockfile at the repo root. Without this, Next
-  // infers the workspace root one level up and picks up that unrelated
-  // app's files (e.g. its src/proxy.ts) during the build.
+  // Pin the workspace root explicitly. Without this, Next walks up
+  // looking for a lockfile and can lock onto an unrelated one it finds in
+  // a parent folder (e.g. a stray package-lock.json sitting next to where
+  // this repo was cloned), then tries to build against that folder's
+  // files instead of this project's.
   turbopack: {
     root: path.join(__dirname),
+  },
+  experimental: {
+    serverActions: {
+      // A real monthly Ashed export (1,000+ rows) runs well past the 1MB
+      // default - see src/app/upload/actions.ts, which is the only place
+      // that body is read.
+      bodySizeLimit: "10mb",
+    },
   },
 };
 
