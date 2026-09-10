@@ -7,6 +7,23 @@ datasource db {
   url      = env("DATABASE_URL")
 }
 
+enum UserRole {
+  ADMIN
+  MEMBER
+}
+
+// A person who can log in. There's no self-signup - the first admin is
+// created by the seed script (from ADMIN_USERNAME/ADMIN_PASSWORD), and
+// every other account is added by an admin from /users.
+model User {
+  id           String   @id @default(cuid())
+  username     String   @unique
+  passwordHash String
+  role         UserRole @default(MEMBER)
+  createdAt    DateTime @default(now())
+  createdById  String?
+}
+
 enum Side {
   EAST
   WEST

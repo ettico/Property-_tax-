@@ -1,6 +1,8 @@
 "use server";
 
-import { runAudit } from "@/lib/auditPipeline";
+import { categorizeRows } from "@/lib/auditPipeline";
+import { verifySession } from "@/lib/dal";
+import { buildAuditWorkbook } from "@/lib/excelExport";
 import { parseAshedMonthlyExport } from "@/lib/excelParser";
 import { SEED_COMMISSION_RULES } from "@/lib/rules.seed";
 import type { Side } from "@/lib/types";
@@ -10,7 +12,8 @@ import type { AuditRunState } from "./types";
  * Server Action: the only place this app parses an uploaded file or runs
  * the audit engine. The file's bytes and every row of the parsed export
  * stay on the server; the client only ever receives the resulting
- * findings/summary, never the raw file content.
+ * categorized rows/summary and, if requested, the finished .xlsx bytes -
+ * never the raw file content.
  *
  * `side` is a temporary stand-in for the real per-property zone lookup
  * (Appendix D of the tax order, not loaded yet) - see README "מה עדיין
@@ -21,6 +24,8 @@ export async function runMonthlyAudit(
   _prevState: AuditRunState,
   formData: FormData,
 ): Promise<AuditRunState> {
+  await verifySession(); // redirects to /login if the session cookie is missing/invalid
+
   const file = formData.get("excelFile");
   const side = formData.get("side");
 
@@ -42,14 +47,17 @@ export async function runMonthlyAudit(
   }
 
   const resolvedSide = side as Side;
-  const findings = runAudit(rows, SEED_COMMISSION_RULES, {
+  const results = categorizeRows(rows, SEED_COMMISSION_RULES, {
     resolveSide: () => resolvedSide,
   });
+
+  const workbook = await buildAuditWorkbook(results);
 
   return {
     status: "success",
     rowCount: rows.length,
     parseWarnings: warnings.map((w) => w.message),
-    findings,
+    results,
+    workbookBase64: workbook.toString("base64"),
   };
 }

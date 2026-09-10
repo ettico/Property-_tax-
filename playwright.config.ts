@@ -1,5 +1,6 @@
 import { existsSync } from "node:fs";
 import { defineConfig } from "@playwright/test";
+import "dotenv/config";
 
 const PORT = 3311;
 
@@ -29,7 +30,9 @@ export default defineConfig({
   },
   webServer: {
     command: `npm run build && npx next start -p ${PORT}`,
-    url: `http://localhost:${PORT}/upload`,
+    // /login is the one page that never requires a session, so it's a
+    // reliable readiness check regardless of the auth changes elsewhere.
+    url: `http://localhost:${PORT}/login`,
     reuseExistingServer: !process.env.CI,
     timeout: 120_000,
   },

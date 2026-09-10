@@ -1,14 +1,19 @@
 import path from "node:path";
 import { expect, test } from "@playwright/test";
+import { signInAs } from "./auth-helper";
 
 const FIXTURE_PATH = path.join(__dirname, "fixtures", "monthly-export.xls");
 
+test.beforeEach(async ({ context, baseURL }) => {
+  await signInAs(context, baseURL!);
+});
+
 // End-to-end proof that the real pipeline works, not just the unit-tested
 // pieces in isolation: a browser uploads the fixture file, the Server
-// Action (src/app/upload/actions.ts) parses it and runs the audit engine
-// entirely server-side, and the client renders whatever comes back - no
-// mocking on either side.
-test("uploading the monthly export renders the expected findings", async ({ page }) => {
+// Action (src/app/(app)/upload/actions.ts) parses it and runs the audit
+// engine entirely server-side, and the client renders whatever comes back
+// - no mocking on either side.
+test("uploading the monthly export renders three separate CLEAN / REVIEW / CRITICAL lists", async ({ page }) => {
   await page.goto("/upload");
 
   await page.setInputFiles("#excelFile", FIXTURE_PATH);
@@ -17,25 +22,30 @@ test("uploading the monthly export renders the expected findings", async ({ page
   await page.getByRole("button", { name: "הרץ ביקורת" }).click();
 
   await expect(page.getByText("שורות שנבדקו")).toBeVisible();
-  await expect(page.getByText("3", { exact: true })).toBeVisible();
 
-  const table = page.locator("table");
-  await expect(table).toBeVisible();
+  // CRITICAL section (open by default): row 2, commission tampered to 500
+  // against an expected 9.40% * 155.95 = 14.66.
+  const criticalSection = page.locator("details", { has: page.getByText("קריטי") }).first();
+  await expect(criticalSection).toContainText("30074-009-000-1018");
+  await expect(criticalSection).toContainText("14.66");
+  await expect(criticalSection).toContainText("500");
 
-  // Row 1 (30006-030-004-0072) was left correctly priced - it must not
-  // appear as a finding.
-  await expect(table.getByText("30006-030-004-0072")).toHaveCount(0);
+  // REVIEW section (open by default): row 3, a levy decrease that still
+  // recorded a positive commission - flagged for human judgment, not
+  // asserted as an outright error.
+  const reviewSection = page.locator("details", { has: page.getByText("לבדיקה") }).first();
+  await expect(reviewSection).toContainText("30569-421-014-0062");
 
-  // Row 2: commission tampered to 500 against an expected 9.40% * 155.95 = 14.66.
-  const mismatchRow = table.locator("tr", { has: page.getByText("30074-009-000-1018") });
-  await expect(mismatchRow).toContainText("קריטי");
-  await expect(mismatchRow).toContainText("14.66");
-  await expect(mismatchRow).toContainText("500");
+  // CLEAN section is collapsed by default - expand it and confirm row 1
+  // (left correctly priced) shows up there, with its calculation
+  // explained rather than just being absent.
+  const cleanSection = page.locator("details", { has: page.getByText("תקינים") }).first();
+  await cleanSection.locator("summary").click();
+  await expect(cleanSection).toContainText("30006-030-004-0072");
+  await expect(cleanSection).toContainText("1,466.6"); // he-IL locale formatting adds the thousands comma
 
-  // Row 3: a levy decrease that still recorded a positive commission -
-  // flagged for human review, not asserted as an outright error.
-  const decreaseRow = table.locator("tr", { has: page.getByText("30569-421-014-0062") });
-  await expect(decreaseRow).toContainText("לבדיקה");
+  // The finished workbook is ready to download.
+  await expect(page.getByRole("button", { name: /הורדת אקסל/ })).toBeEnabled();
 });
 
 test("rejects a submission with no file selected", async ({ page }) => {
@@ -44,5 +54,11 @@ test("rejects a submission with no file selected", async ({ page }) => {
   // The browser's own `required` validation blocks submission - the
   // Server Action's own "יש לבחור קובץ" message is the fallback if that
   // native check is ever bypassed.
-  await expect(page.locator("table")).toHaveCount(0);
+  await expect(page.getByText("שורות שנבדקו")).toHaveCount(0);
+});
+
+test("redirects an unauthenticated visitor to /login", async ({ page, context }) => {
+  await context.clearCookies();
+  await page.goto("/upload");
+  await expect(page).toHaveURL(/\/login/);
 });

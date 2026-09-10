@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { runAudit } from "../auditPipeline";
+import { categorizeRows, runAudit } from "../auditPipeline";
 import type { ParsedPropertyRow } from "../excelParser";
 import { SEED_COMMISSION_RULES } from "../rules.seed";
 
@@ -134,5 +134,34 @@ describe("runAudit", () => {
       { resolveSide },
     );
     expect(findings.some((f) => f.findingType === "SPLIT_IMBALANCE")).toBe(true);
+  });
+});
+
+describe("categorizeRows", () => {
+  it("returns a CLEAN entry (with the calculation explained) for a correctly-priced row, not just silence", () => {
+    const results = categorizeRows([row({})], SEED_COMMISSION_RULES, { resolveSide });
+    expect(results).toHaveLength(1);
+    expect(results[0].category).toBe("CLEAN");
+    expect(results[0].expectedValue).toBeCloseTo(94, 1);
+    // A clean row must still carry the "how" - not just "it's fine".
+    expect(results[0].explanation).toMatch(/9\.4|0\.094/);
+  });
+
+  it("keeps flagged rows out of CLEAN, with the same finding data runAudit exposes", () => {
+    const results = categorizeRows([row({ assetId: "X", commissionPaid: 500 })], SEED_COMMISSION_RULES, {
+      resolveSide,
+    });
+    expect(results).toHaveLength(1);
+    expect(results[0].category).toBe("CRITICAL");
+    expect(results[0].findingType).toBe("COMMISSION_MISMATCH");
+  });
+
+  it("returns one entry per input row plus split-imbalance entries, never dropping a row silently", () => {
+    const results = categorizeRows(
+      [row({ assetId: "A" }), row({ assetId: "B", commissionPaid: 999 })],
+      SEED_COMMISSION_RULES,
+      { resolveSide },
+    );
+    expect(results.map((r) => r.assetId).sort()).toEqual(["A", "B"]);
   });
 });
